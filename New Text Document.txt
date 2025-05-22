@@ -1,0 +1,152 @@
+import streamlit as st
+import joblib
+import pickle
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from tensorflow.keras.applications.xception import preprocess_input
+from tensorflow.keras.preprocessing.image import load_img, img_to_array
+from PIL import Image
+import os
+
+# Set page configuration
+st.set_page_config(page_title="Fake News & Deepfake Detection System", layout="wide")
+
+# Title and description
+st.title("Fake News & Deepfake Detection System")
+st.markdown("""
+This application detects fake news articles and deepfake images using machine learning models.
+- **Fake News Detection**: Enter a news article title to check if it's fake or real.
+- **Deepfake Detection**: Upload an image to check if it's a deepfake.
+- **Combined Analysis**: Get a risk assessment based on both predictions.
+""")
+
+# Load models and preprocessors
+try:
+    fake_news_model = joblib.load('fake_news_model.joblib')
+    tfidf_vectorizer = joblib.load('tfidf_vectorizer.joblib')
+    with open('selected_features.pkl', 'rb') as f:
+        selected_features = pickle.load(f)
+    deepfake_model = tf.keras.models.load_model('deepfake_model.keras')
+except FileNotFoundError as e:
+    st.error(f"Error: Model or preprocessor file not found - {e}. Please ensure all files are in the correct directory.")
+    st.stop()
+except Exception as e:
+    st.error(f"Error loading models: {e}")
+    st.stop()
+
+# Function to preprocess title for fake news detection
+def preprocess_title(title, tfidf_vectorizer, selected_features):
+    # Convert to lowercase and remove 'news' (as in the original pipeline)
+    title = title.lower().replace('news', '')
+    # Transform using TF-IDF
+    title_tfidf = tfidf_vectorizer.transform([title]).toarray()
+    # Create a DataFrame with all TF-IDF features
+    title_df = pd.DataFrame(title_tfidf, columns=tfidf_vectorizer.get_feature_names_out())
+    # Add a dummy sentiment score (since the model expects it)
+    # In a real scenario, you'd compute sentiment using VADER as in the original pipeline
+    title_df['sentiment'] = 0.0  # Placeholder; ideally, compute sentiment on the full text
+    # Select the features used by the model
+    X = title_df[selected_features].values
+    return X
+
+# Function to preprocess image for deepfake detection
+def preprocess_image(image):
+    # Resize image to 299x299 (Xception input size)
+    image = image.resize((299, 299))
+    # Convert to array
+    image_array = img_to_array(image)
+    # Add batch dimension
+    image_array = np.expand_dims(image_array, axis=0)
+    # Preprocess for Xception
+    image_array = preprocess_input(image_array)
+    return image_array
+
+# Fake News Detection Section
+st.header("Fake News Detection")
+title_input = st.text_input("Enter the news article title:", placeholder="e.g., Hillary Says Trump Is A Threat To Democracy")
+fake_news_confidence = None
+fake_news_prediction = None
+
+if title_input:
+    try:
+        # Preprocess the title
+        X_title = preprocess_title(title_input, tfidf_vectorizer, selected_features)
+        # Predict with the fake news model
+        fake_news_prob = fake_news_model.predict_proba(X_title)[0]
+        fake_news_pred = fake_news_model.predict(X_title)[0]
+        fake_news_prediction = "Fake" if fake_news_pred == 1 else "Real"
+        fake_news_confidence = fake_news_prob[1] if fake_news_pred == 1 else fake_news_prob[0]
+        
+        # Display results
+        st.subheader("Fake News Detection Result:")
+        st.write(f"**Prediction**: {fake_news_prediction}")
+        st.write(f"**Confidence**: {fake_news_confidence:.2%}")
+        if fake_news_prediction == "Fake":
+            st.warning("This article title is likely fake news. Proceed with caution.")
+        else:
+            st.success("This article title appears to be real.")
+    except Exception as e:
+        st.error(f"Error in fake news detection: {e}")
+
+# Deepfake Detection Section
+st.header("Deepfake Detection")
+uploaded_image = st.file_uploader("Upload an image to check for deepfake:", type=["jpg", "jpeg", "png"])
+deepfake_confidence = None
+deepfake_prediction = None
+
+if uploaded_image:
+    try:
+        # Load and display the image
+        image = Image.open(uploaded_image)
+        st.image(image, caption="Uploaded Image", width=300)
+        
+        # Preprocess the image
+        image_array = preprocess_image(image)
+        # Predict with the deepfake model
+        deepfake_prob = deepfake_model.predict(image_array, verbose=0)[0][0]
+        deepfake_pred = 1 if deepfake_prob > 0.4 else 0  # Using the same threshold as in the pipeline
+        deepfake_prediction = "Deepfake" if deepfake_pred == 1 else "Real"
+        deepfake_confidence = deepfake_prob if deepfake_pred == 1 else 1 - deepfake_prob
+        
+        # Display results
+        st.subheader("Deepfake Detection Result:")
+        st.write(f"**Prediction**: {deepfake_prediction}")
+        st.write(f"**Confidence**: {deepfake_confidence:.2%}")
+        if deepfake_prediction == "Deepfake":
+            st.warning("This image is likely a deepfake. Proceed with caution.")
+        else:
+            st.success("This image appears to be real.")
+    except Exception as e:
+        st.error(f"Error in deepfake detection: {e}")
+
+# Combined Analysis Section
+st.header("Combined Risk Assessment")
+if fake_news_confidence is not None and deepfake_confidence is not None:
+    # Compute risk scores
+    fake_news_risk = fake_news_confidence * (1 if fake_news_prediction == "Fake" else 0)
+    deepfake_risk = deepfake_confidence * (1 if deepfake_prediction == "Deepfake" else 0)
+    combined_risk_score = (fake_news_risk + deepfake_risk) / 2
+    
+    # Display risk assessment
+    st.subheader("Risk Assessment:")
+    st.write(f"**Combined Risk Score**: {combined_risk_score:.2f}")
+    if combined_risk_score > 0.3:
+        st.error(f"High risk of misinformation detected (Risk Score: {combined_risk_score:.2f}): A significant portion of the content is classified as fake news or deepfake.")
+    else:
+        st.info(f"Moderate to low risk of misinformation (Risk Score: {combined_risk_score:.2f}): Monitor content for further review.")
+    
+    # Recommendations
+    st.subheader("Recommendations:")
+    if fake_news_prediction == "Fake":
+        st.write("- **Fake News**: Review the article title and content carefully. Cross-check with credible sources.")
+    if deepfake_prediction == "Deepfake":
+        st.write("- **Deepfake**: This image may be manipulated. Verify its authenticity with trusted tools or sources.")
+    if combined_risk_score > 0.3:
+        st.write("- **Action**: Consider removing or flagging this content to prevent the spread of misinformation.")
+    else:
+        st.write("- **Action**: Monitor the content and proceed with caution.")
+
+# Footer
+st.markdown("---")
+st.write("Built with ❤️ by Arpit | Powered by Streamlit | Models trained on May 21, 2025")
